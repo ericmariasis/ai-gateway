@@ -1,0 +1,52 @@
+name: OpenTelemetry PR validation
+
+on:
+  push:
+    branches:
+      - codex/otel-pr-check
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: make ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: check
+            cache_key: code-style-check
+            key_suffix: ''
+          - target: test
+            cache_key: unittest
+            key_suffix: '-ubuntu-latest'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: 967c39fec9c1907cf8a69ed0b8fcc9c1b56c517b
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          cache: false
+          go-version-file: go.mod
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: matrix.target == 'check'
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/.cache/golangci-lint
+            ~/go/pkg/mod
+            ~/go/bin
+          key: ${{ matrix.cache_key }}-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}${{ matrix.key_suffix }}
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: matrix.target == 'test'
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/go/bin
+          key: ${{ matrix.cache_key }}-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}${{ matrix.key_suffix }}
+      - run: make ${{ matrix.target }}
