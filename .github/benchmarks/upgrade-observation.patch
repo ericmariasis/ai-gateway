@@ -1,0 +1,175 @@
+--- a/tests/e2e-upgrade/upgrade_test.go
++++ b/tests/e2e-upgrade/upgrade_test.go
+@@ -8,6 +8,7 @@
+ import (
+ 	"context"
+ 	"encoding/base64"
++	"encoding/json"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+@@ -22,6 +23,7 @@
+ 
+ 	"github.com/google/uuid"
+ 	"github.com/stretchr/testify/require"
++	corev1 "k8s.io/api/core/v1"
+ 
+ 	"github.com/envoyproxy/ai-gateway/internal/controller"
+ 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
+@@ -141,13 +143,19 @@
+ 			}()
+ 
+ 			const manifest = "testdata/manifest.yaml"
++			stopObservation := observeUpgradePods(t)
++			defer stopObservation()
+ 			require.NoError(t, e2elib.KubectlApplyManifest(t.Context(), manifest))
+ 
++			observeUpgrade(t.Name(), "wait_enter", "")
+ 			e2elib.RequireWaitForGatewayPodReady(t, egSelector)
++			observeUpgrade(t.Name(), "wait_return", "")
+ 			ipAddress := e2elib.RequireGatewayListenerAddressViaMetalLB(t, "default", "upgrade-test")
+ 
+ 			// Ensure that first request works.
+-			require.NoError(t, makeRequest(t, ipAddress, phase.String()))
++			firstErr := sendUpgradeRequest(t, ipAddress, phase.String(), true)
++			stopObservation()
++			require.NoError(t, firstErr)
+ 
+ 			requestLoopCtx, cancelRequests := context.WithCancel(t.Context())
+ 			defer cancelRequests()
+@@ -247,6 +255,10 @@
+ // Since the testupstream server takes 200ms interval between each chunk, this ensures that the request
+ // lasts long enough to overlap with pod restarts during the upgrade.
+ func makeRequest(t *testing.T, ipAddress string, phase string) error {
++	return sendUpgradeRequest(t, ipAddress, phase, false)
++}
++
++func sendUpgradeRequest(t *testing.T, ipAddress string, phase string, first bool) error {
+ 	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/v1/chat/completions", ipAddress),
+ 		strings.NewReader(`{"messages":[{"role":"user","content":"Say this is a test"}],"model":"some-cool-model", "stream":true}`))
+ 	require.NoError(t, err, "failed to create request")
+@@ -290,13 +302,25 @@
+ 	client := &http.Client{
+ 		Timeout: 30 * time.Second,
+ 	}
++	if first {
++		observeUpgrade(t.Name(), "request_start", "")
++	}
+ 	resp, err := client.Do(req)
+ 	if err != nil {
++		if first {
++			observeUpgrade(t.Name(), "request_error", "stage=transport error=%q", err.Error())
++		}
+ 		return fmt.Errorf("[%s] request failed: %w", phase, err)
+ 	}
+ 	defer resp.Body.Close()
+ 	// Wait until we read the entire streaming response body.
+ 	body, err := io.ReadAll(resp.Body)
++	if first {
++		observeUpgrade(t.Name(), "first_response", "status=%d bytes=%d", resp.StatusCode, len(body))
++		if err != nil {
++			observeUpgrade(t.Name(), "request_error", "stage=body error=%q", err.Error())
++		}
++	}
+ 	if err != nil {
+ 		return fmt.Errorf("[%s] failed to read response body: %w", phase, err)
+ 	}
+@@ -492,13 +516,19 @@
+ 	// Step 2: Apply test manifest (v1alpha1 resources) and wait for Gateway to be ready
+ 	t.Log("Step 2: Applying test manifest with v1alpha1 resources")
+ 	const manifest = "testdata/manifest.yaml"
++	stopObservation := observeUpgradePods(t)
++	defer stopObservation()
+ 	require.NoError(t, e2elib.KubectlApplyManifest(ctx, manifest))
++	observeUpgrade(t.Name(), "wait_enter", "")
+ 	e2elib.RequireWaitForGatewayPodReady(t, egSelector)
++	observeUpgrade(t.Name(), "wait_return", "")
+ 	ipAddress := e2elib.RequireGatewayListenerAddressViaMetalLB(t, "default", "upgrade-test")
+ 
+ 	// Step 3: Verify inference calls work with v1alpha1
+ 	t.Log("Step 3: Verifying inference calls work with v1alpha1 resources")
+-	require.NoError(t, makeRequest(t, ipAddress, "before upgrade"))
++	firstErr := sendUpgradeRequest(t, ipAddress, "before upgrade", true)
++	stopObservation()
++	require.NoError(t, firstErr)
+ 	t.Log("Inference calls successful with v1alpha1")
+ 
+ 	// Step 4: Upgrade to latest version (with v1beta1 CRDs)
+@@ -540,3 +570,77 @@
+ 
+ 	t.Log("CRD version upgrade test completed successfully!")
+ }
++
++// observeUpgrade timestamps events on the runner, independently of CI log delivery.
++func observeUpgrade(testName, event, format string, args ...any) {
++	fmt.Printf("UPGRADE_OBS time=%s test=%s event=%s %s\n",
++		time.Now().UTC().Format(time.RFC3339Nano), testName, event, fmt.Sprintf(format, args...))
++}
++
++// observeUpgradePods watches transitions independently of the readiness gate.
++func observeUpgradePods(t *testing.T) context.CancelFunc {
++	ctx, cancel := context.WithCancel(t.Context())
++	testName := t.Name()
++	go func() {
++		cmd := e2elib.Kubectl(ctx, "get", "pods", "-n", e2elib.EnvoyGatewayNamespace,
++			"-l", egSelector, "--watch", "--output-watch-events", "-o", "json")
++		cmd.Stdout = nil
++		stdout, err := cmd.StdoutPipe()
++		if err != nil {
++			observeUpgrade(testName, "watch_error", "error=%q", err.Error())
++			return
++		}
++		if err := cmd.Start(); err != nil {
++			observeUpgrade(testName, "watch_error", "error=%q", err.Error())
++			return
++		}
++		defer func() {
++			if err := cmd.Wait(); err != nil && ctx.Err() == nil {
++				observeUpgrade(testName, "watch_error", "error=%q", err.Error())
++			}
++		}()
++		decoder := json.NewDecoder(stdout)
++		last := map[string]string{}
++		for {
++			var event struct {
++				Type   string
++				Object corev1.Pod
++			}
++			if err := decoder.Decode(&event); err != nil {
++				if ctx.Err() == nil {
++					observeUpgrade(testName, "watch_error", "error=%q", err.Error())
++				}
++				return
++			}
++			pod := &event.Object
++			if pod.Name == "" {
++				continue
++			}
++			ready := corev1.ConditionUnknown
++			for _, condition := range pod.Status.Conditions {
++				if condition.Type == corev1.PodReady {
++					ready = condition.Status
++					break
++				}
++			}
++			terminating := "none"
++			if pod.DeletionTimestamp != nil {
++				terminating = pod.DeletionTimestamp.Time.UTC().Format(time.RFC3339Nano)
++			}
++			sidecar := false
++			for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
++				for _, container := range containers {
++					if container.Name == "ai-gateway-extproc" {
++						sidecar = true
++					}
++				}
++			}
++			state := fmt.Sprintf("name=%s ready=%s terminating=%s sidecar=%t", pod.Name, ready, terminating, sidecar)
++			if state != last[pod.Name] || event.Type == "DELETED" {
++				observeUpgrade(testName, "pod", "action=%s %s", event.Type, state)
++				last[pod.Name] = state
++			}
++		}
++	}()
++	return cancel
++}
