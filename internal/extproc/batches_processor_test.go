@@ -368,6 +368,26 @@ func TestBatches_SetBackend(t *testing.T) {
 		err := upstream.SetBackend(context.Background(), openAIBackend("ns", "a", 0), "route", rp)
 		require.ErrorContains(t, err, "exactly one backend per route rule")
 	})
+	t.Run("same route name in different namespaces", func(t *testing.T) {
+		namespaces := []string{"team-a", "team-b"}
+		config := &filterapi.RuntimeConfig{Backends: make(map[string]*filterapi.RuntimeBackend)}
+		for _, ns := range namespaces {
+			key := internalapi.PerRouteRuleRefBackendName(ns, "openai", "chat", 0, 0)
+			config.Backends[key] = &filterapi.RuntimeBackend{Backend: &filterapi.Backend{
+				Name:   key,
+				Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI},
+			}}
+		}
+		for _, ns := range namespaces {
+			t.Run(ns, func(t *testing.T) {
+				key := internalapi.PerRouteRuleRefBackendName(ns, "openai", "chat", 0, 0)
+				rp := &batchesProcessor{op: batchesOpCreate, config: config, decodedBackend: &backendKey{ns, "openai"}, logger: slog.Default()}
+				err := upstream.SetBackend(t.Context(), config.Backends[key], "chat", rp)
+				require.NoError(t, err)
+				require.Equal(t, &backendKey{ns, "openai"}, rp.backend)
+			})
+		}
+	})
 	t.Run("non-openai schema", func(t *testing.T) {
 		rp := &batchesProcessor{op: batchesOpRetrieve, logger: slog.Default()}
 		b := openAIBackend("ns", "apple", 0)
