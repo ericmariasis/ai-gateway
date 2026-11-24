@@ -1,9 +1,7 @@
 name: Mid-stream idle timeout trace
 
 on:
-  push:
-    branches:
-      - codex/midstream-timeout-trace
+  workflow_call:
 
 permissions:
   contents: read
