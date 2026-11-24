@@ -151,6 +151,9 @@ data: [DONE]
 			id := strconv.FormatInt(start.UnixNano(), 10)
 			req.Header.Set("X-Idle-Trace", id)
 			trace := &httptrace.ClientTrace{
+				WroteRequest: func(info httptrace.WroteRequestInfo) {
+					fmt.Printf("IDLE_TRACE event=request_written at=%d request=%s error=%q\n", time.Now().UnixNano(), id, fmt.Sprint(info.Err))
+				},
 				GotFirstResponseByte: func() {
 					fmt.Printf("IDLE_TRACE event=first_response_byte at=%d request=%s\n", time.Now().UnixNano(), id)
 				},
