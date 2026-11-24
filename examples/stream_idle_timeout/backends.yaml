@@ -127,7 +127,7 @@ metadata:
   namespace: default
 data:
   semi-silent.py: |
-    import socket, sys
+    import re, socket, sys, time
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", 8080))
@@ -136,11 +136,24 @@ data:
     sys.stderr.flush()
     while True:
         conn, addr = s.accept()
-        sys.stderr.write(f"accepted from {addr}\n")
+        accepted = time.time_ns()
+        sys.stderr.write(f"IDLE_TRACE event=accepted at={accepted} peer={addr[0]}:{addr[1]}\n")
         sys.stderr.flush()
         # http sse response
-        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: hello\n\n")
-        sys.stderr.write(f"sent first byte to {addr}; keeping it silent\n")
+        try:
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: hello\n\n")
+        except OSError as err:
+            print(f"IDLE_TRACE event=send_error at={time.time_ns()} accepted={accepted} error={err!r}", file=sys.stderr, flush=True)
+            raise
+        sent = time.time_ns()
+        # Inspect only bytes already buffered, after sending; leave the request unread.
+        try:
+            pending = conn.recv(8192, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+        except (BlockingIOError, ConnectionError):
+            pending = b""
+        trace = re.search(rb"(?im)^x-idle-trace: *(\d+)\r?$", pending)
+        request = trace[1].decode("ascii") if trace else "unknown"
+        print(f"IDLE_TRACE event=sent at={sent} accepted={accepted} request={request} peer={addr[0]}:{addr[1]}", file=sys.stderr, flush=True)
         # Intentionally don't recv / don't send. Hold the connection open
         # until Envoy gives up.
 ---

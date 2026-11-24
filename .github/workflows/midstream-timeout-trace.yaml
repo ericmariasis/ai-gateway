@@ -1,0 +1,60 @@
+name: Mid-stream idle timeout trace
+
+on:
+  push:
+    branches:
+      - codex/midstream-timeout-trace
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    if: github.repository == 'ericmariasis/ai-gateway'
+    name: Mid-stream trace (trial ${{ matrix.trial }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          cache: false
+          go-version-file: go.mod
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/.cache/golangci-lint
+            ~/go/pkg/mod
+            ~/go/bin
+          key: e2e-test-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - name: Fetch the Envoy Gateway chart used in the failing run
+        shell: bash
+        env:
+          MANIFEST_DIGEST: sha256:b64153b25563555a04cb0724ef40a4cd1fee21f015f50ef9fc311351e2e030eb
+        run: |
+          set -euo pipefail
+          registry=https://registry-1.docker.io/v2/envoyproxy/gateway-helm
+          token=$(curl -fsS --retry 3 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:envoyproxy/gateway-helm:pull' | jq -er '.token')
+          manifest="$RUNNER_TEMP/gateway-manifest.json"
+          chart="$RUNNER_TEMP/gateway-helm.tgz"
+          curl -fsSL --retry 3 -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "$registry/manifests/$MANIFEST_DIGEST" -o "$manifest"
+          printf '%s  %s\n' "${MANIFEST_DIGEST#sha256:}" "$manifest" | sha256sum --check
+          chart_digest=$(jq -er '[.layers[] | select(.mediaType == "application/vnd.cncf.helm.chart.content.v1.tar+gzip")] | select(length == 1) | .[0].digest | select(test("^sha256:[a-f0-9]{64}$"))' "$manifest")
+          curl -fsSL --retry 3 -H "Authorization: Bearer $token" "$registry/blobs/$chart_digest" -o "$chart"
+          printf '%s  %s\n' "${chart_digest#sha256:}" "$chart" | sha256sum --check
+          echo "Verified gateway chart manifest $MANIFEST_DIGEST and layer $chart_digest"
+          echo "TRACE_EG_CHART=$chart" >> "$GITHUB_ENV"
+      - name: Trace first-byte delivery during the mid-stream timeout test
+        env:
+          EG_VERSION: v0.0.0-latest
+        run: make test-e2e GO_TEST_ARGS='-run Test_Examples_StreamIdleTimeout/stream_cut_when_idle_fires_mid-stream'

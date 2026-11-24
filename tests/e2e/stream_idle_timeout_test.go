@@ -8,8 +8,11 @@ package e2e
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +121,16 @@ data: [DONE]
 	})
 
 	t.Run("stream cut when idle fires mid-stream", func(t *testing.T) {
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+			if err := e2elib.Kubectl(ctx, "logs", "-n", "default", "-l", "app=stream-idle-timeout-semi-silent", "--prefix", "--tail=-1").Run(); err != nil {
+				t.Errorf("collect backend trace: %v", err)
+			}
+			if err := e2elib.Kubectl(ctx, "get", "pods", "-A", "-o", "custom-columns=POD:.metadata.name,IMAGES:.status.containerStatuses[*].imageID").Run(); err != nil {
+				t.Logf("collect image IDs: %v", err)
+			}
+		})
 		// The "semi-silent" rule routes to a priority-0 backend that sends a partial SSE response
 		// and then holds the connection open without sending another byte. Once response bytes
 		// have already reached the downstream, the per-try idle timeout cuts the stream: Envoy
@@ -135,13 +148,26 @@ data: [DONE]
 			// No response headers: the semi-silent backend serves its own partial raw SSE response.
 
 			start := time.Now()
+			id := strconv.FormatInt(start.UnixNano(), 10)
+			req.Header.Set("X-Idle-Trace", id)
+			trace := &httptrace.ClientTrace{
+				GotFirstResponseByte: func() {
+					fmt.Printf("IDLE_TRACE event=first_response_byte at=%d request=%s\n", time.Now().UnixNano(), id)
+				},
+			}
+			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+			fmt.Printf("IDLE_TRACE event=request_start at=%d request=%s\n", start.UnixNano(), id)
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
+				fmt.Printf("IDLE_TRACE event=request_error at=%d request=%s error=%q\n", time.Now().UnixNano(), id, err)
 				// The reset can surface as a transport error before headers are read
 				t.Logf("request failed after %s: %v", time.Since(start), err)
 				return false
 			}
-			body, readErr := io.ReadAll(resp.Body)
+			fmt.Printf("IDLE_TRACE event=headers at=%d request=%s status=%d\n", time.Now().UnixNano(), id, resp.StatusCode)
+			first := &idleFirstChunk{request: id}
+			body, readErr := io.ReadAll(io.TeeReader(resp.Body, first))
+			fmt.Printf("IDLE_TRACE event=body_end at=%d request=%s bytes=%d error=%q\n", time.Now().UnixNano(), id, len(body), fmt.Sprint(readErr))
 			_ = resp.Body.Close()
 			elapsed := time.Since(start)
 
@@ -176,4 +202,18 @@ data: [DONE]
 			return true
 		}, 30*time.Second, 2*time.Second, "streaming request was not cut by the mid-stream idle timeout")
 	})
+}
+
+// idleFirstChunk records when the client first reads body data, before waiting for the reset.
+type idleFirstChunk struct {
+	request string
+	seen    bool
+}
+
+func (f *idleFirstChunk) Write(p []byte) (int, error) {
+	if !f.seen && len(p) != 0 {
+		f.seen = true
+		fmt.Printf("IDLE_TRACE event=first_body at=%d request=%s prefix=%q\n", time.Now().UnixNano(), f.request, p[:min(len(p), 48)])
+	}
+	return len(p), nil
 }

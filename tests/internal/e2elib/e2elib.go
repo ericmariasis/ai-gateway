@@ -416,7 +416,7 @@ func initEnvoyGateway(ctx context.Context, namespace string, inferenceExtension 
 	// Build helm command with base values + addons based on what features are needed
 	helmArgs := []string{
 		"upgrade", "-i", "eg",
-		"oci://docker.io/envoyproxy/gateway-helm", "--version", egVersion,
+		cmp.Or(os.Getenv("TRACE_EG_CHART"), "oci://docker.io/envoyproxy/gateway-helm"), "--version", egVersion,
 		"-n", "envoy-gateway-system", "--create-namespace",
 		"-f", "../../manifests/envoy-gateway-values.yaml",
 		"-f", "../../examples/token_ratelimit/envoy-gateway-values-addon.yaml",
