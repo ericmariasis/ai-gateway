@@ -1,6 +1,7 @@
 name: Retest Action on PR Comment
 
 on:
+  workflow_dispatch:
   issue_comment:
     types: [created]
 
@@ -8,6 +9,10 @@ permissions:
   contents: read
 
 jobs:
+  quota-measurement:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'ericmariasis/ai-gateway' && github.ref == 'refs/heads/codex/quota-v193-hosted-watch'
+    uses: ./.github/workflows/quota-readiness-pair.yaml
+
   retest:
     if: ${{
       github.event.issue.pull_request

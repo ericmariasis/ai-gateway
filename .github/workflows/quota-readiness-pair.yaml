@@ -2,9 +2,7 @@ name: Hosted quota readiness pair
 run-name: Compare quota readiness on Envoy Gateway v1.9.3
 
 on:
-  push:
-    branches:
-      - codex/quota-v193-hosted-watch
+  workflow_call:
 
 permissions:
   contents: read
