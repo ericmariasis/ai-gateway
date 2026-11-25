@@ -141,20 +141,35 @@ func TestBatches_Create_Rejections(t *testing.T) {
 	codec := newTestCodec()
 	batchID := encodeGatewayID(t, codec, idcodec.KindBatch, "ns", "apple", "m1", "batch_native")
 	noModel := encodeGatewayID(t, codec, idcodec.KindFile, "ns", "apple", "", "file-native")
-	tests := map[string]string{
-		"not json":              `nope`,
-		"missing input file":    `{"endpoint":"/v1/embeddings"}`,
-		"native file id":        `{"input_file_id":"file-abc","endpoint":"/v1/embeddings"}`,
-		"batch id as file":      `{"input_file_id":"` + batchID + `","endpoint":"/v1/embeddings"}`,
-		"file id without model": `{"input_file_id":"` + noModel + `","endpoint":"/v1/embeddings"}`,
+	fileID := encodeGatewayID(t, codec, idcodec.KindFile, "ns", "apple", "m1", "file-native")
+	tests := map[string]struct{ body, wantJSON string }{
+		"not json":              {body: `nope`},
+		"missing input file":    {body: `{"endpoint":"/v1/embeddings"}`},
+		"native file id":        {body: `{"input_file_id":"file-abc","endpoint":"/v1/embeddings"}`},
+		"batch id as file":      {body: `{"input_file_id":"` + batchID + `","endpoint":"/v1/embeddings"}`},
+		"file id without model": {body: `{"input_file_id":"` + noModel + `","endpoint":"/v1/embeddings"}`},
+		"duplicate endpoint": {
+			body:     `{"input_file_id":"` + fileID + `","endpoint":"/v1/chat/completions","endpoint":"/v1/embeddings","completion_window":"24h"}`,
+			wantJSON: `{"type":"error","error":{"type":"invalid_request_error","code":"400","message":"duplicate field \"endpoint\" in request body"}}`,
+		},
+		"non-object body": {
+			body:     `[]`,
+			wantJSON: `{"type":"error","error":{"type":"invalid_request_error","code":"400","message":"request body must be a JSON object"}}`,
+		},
 	}
-	for name, body := range tests {
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			p := newBatchesProcessorForPath(codec, http.MethodPost, "/v1/batches")
 			p.op = batchesOpCreate
-			resp, err := p.ProcessRequestBody(context.Background(), &extprocv3.HttpBody{Body: []byte(body)})
+			resp, err := p.ProcessRequestBody(context.Background(), &extprocv3.HttpBody{Body: []byte(tc.body)})
 			require.NoError(t, err)
 			require.Equal(t, http.StatusBadRequest, immediateStatus(resp))
+			if tc.wantJSON != "" {
+				immediate := resp.GetImmediateResponse()
+				require.Nil(t, p.decodedBackend)
+				require.Equal(t, "application/json", headers(immediate.GetHeaders().GetSetHeaders())["content-type"])
+				require.JSONEq(t, tc.wantJSON, string(immediate.GetBody()))
+			}
 		})
 	}
 }
