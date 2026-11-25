@@ -67,6 +67,43 @@ func TestResponseModel_GCPVertexAIStreaming(t *testing.T) {
 	require.Equal(t, uint32(5), outputTokens)
 }
 
+func TestGeminiRequestBody_AssistantRefusalHistory(t *testing.T) {
+	const withReply = `[
+		{"role":"user","parts":[{"text":"First question."}]},
+		{"role":"model","parts":[{"text":"I have to decline."}]},
+		{"role":"user","parts":[{"text":"Follow-up question."}]}
+	]`
+	const merged = `[{"role":"user","parts":[{"text":"First question."},{"text":"Follow-up question."}]}]`
+
+	for _, tc := range []struct {
+		name, assistant, wantContents string
+	}{
+		{"top-level refusal", `{"role":"assistant","refusal":"I have to decline."}`, withReply},
+		{"top-level refusal with null content", `{"role":"assistant","content":null,"refusal":"I have to decline."}`, withReply},
+		{"refusal content part", `{"role":"assistant","content":[{"type":"refusal","refusal":"I have to decline."}]}`, withReply},
+		{"ordinary text", `{"role":"assistant","content":"I have to decline."}`, withReply},
+		{"empty reply", `{"role":"assistant","content":""}`, merged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"model":"gemini-2.5-flash","messages":[
+				{"role":"user","content":"First question."},` + tc.assistant + `,
+				{"role":"user","content":"Follow-up question."}
+			]}`)
+			var req openai.ChatCompletionRequest
+			require.NoError(t, json.Unmarshal(body, &req))
+			tr := NewChatCompletionOpenAIToGCPVertexAITranslator(req.Model)
+			_, outgoing, err := tr.RequestBody(body, &req, false)
+			require.NoError(t, err)
+
+			var gemini struct {
+				Contents json.RawMessage `json:"contents"`
+			}
+			require.NoError(t, json.Unmarshal(outgoing, &gemini))
+			require.JSONEq(t, tc.wantContents, string(gemini.Contents))
+		})
+	}
+}
+
 func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T) {
 	wantBdy := []byte(`{
     "contents": [

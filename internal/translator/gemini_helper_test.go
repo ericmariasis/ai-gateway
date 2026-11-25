@@ -348,21 +348,39 @@ func TestAssistantMsgToGeminiParts(t *testing.T) {
 			},
 			expectedToolCalls: map[string]string{},
 		},
-		// Currently noting is returned for refusal messages.
 		{
-			name: "text content with refusal message",
+			name: "refusal in both forms retains its content part position",
 			msg: openai.ChatCompletionAssistantMessageParam{
+				Refusal: "Response was refused",
 				Content: openai.StringOrAssistantRoleContentUnion{
 					Value: []openai.ChatCompletionAssistantMessageParamContent{
+						{Type: openai.ChatCompletionAssistantMessageParamContentTypeText, Text: ptr.To("Before.")},
 						{
 							Type:    openai.ChatCompletionAssistantMessageParamContentTypeRefusal,
 							Refusal: ptr.To("Response was refused"),
 						},
+						{Type: openai.ChatCompletionAssistantMessageParamContentTypeText, Text: ptr.To("After.")},
 					},
 				},
 				Role: openai.ChatMessageRoleAssistant,
 			},
-			expectedParts:     nil,
+			expectedParts: []*genai.Part{
+				genai.NewPartFromText("Before."),
+				genai.NewPartFromText("Response was refused"),
+				genai.NewPartFromText("After."),
+			},
+			expectedToolCalls: map[string]string{},
+		},
+		{
+			name: "empty refusal parts",
+			msg: openai.ChatCompletionAssistantMessageParam{
+				Content: openai.StringOrAssistantRoleContentUnion{
+					Value: []openai.ChatCompletionAssistantMessageParamContent{
+						{Type: openai.ChatCompletionAssistantMessageParamContentTypeRefusal},
+						{Type: openai.ChatCompletionAssistantMessageParamContentTypeRefusal, Refusal: ptr.To("")},
+					},
+				},
+			},
 			expectedToolCalls: map[string]string{},
 		},
 		{
@@ -420,8 +438,9 @@ func TestAssistantMsgToGeminiParts(t *testing.T) {
 			},
 		},
 		{
-			name: "multiple tool calls with content",
+			name: "multiple tool calls with content and a top-level refusal",
 			msg: openai.ChatCompletionAssistantMessageParam{
+				Refusal: "I have to decline the other request.",
 				Content: openai.StringOrAssistantRoleContentUnion{
 					Value: "I'll help you with that",
 				},
@@ -458,6 +477,7 @@ func TestAssistantMsgToGeminiParts(t *testing.T) {
 					"timezone": "EST",
 				}),
 				genai.NewPartFromText("I'll help you with that"),
+				genai.NewPartFromText("I have to decline the other request."),
 			},
 			expectedToolCalls: map[string]string{
 				"call_789": "get_weather",

@@ -403,6 +403,7 @@ func assistantMsgToGeminiParts(msg *openai.ChatCompletionAssistantMessageParam) 
 	}
 
 	// Handle content in the assistant message.
+	topLevelRefusal := msg.Refusal
 	switch v := msg.Content.Value.(type) {
 	case string:
 		if v != "" {
@@ -432,7 +433,13 @@ func assistantMsgToGeminiParts(msg *openai.ChatCompletionAssistantMessageParam) 
 					parts = append(parts, thoughtPart)
 				}
 			case openai.ChatCompletionAssistantMessageParamContentTypeRefusal:
-				// Refusal messages are currently ignored in this implementation.
+				if contPart.Refusal != nil && *contPart.Refusal != "" {
+					parts = append(parts, genai.NewPartFromText(*contPart.Refusal))
+					// A refusal present in both forms is already in its content-array position.
+					if *contPart.Refusal == topLevelRefusal {
+						topLevelRefusal = ""
+					}
+				}
 			default:
 				return nil, nil, fmt.Errorf("%w: unsupported content type in assistant message: %s", internalapi.ErrInvalidRequestBody, contPart.Type)
 			}
@@ -441,6 +448,9 @@ func assistantMsgToGeminiParts(msg *openai.ChatCompletionAssistantMessageParam) 
 		// No content provided, this is valid.
 	default:
 		return nil, nil, fmt.Errorf("%w: message 'content' must be a string or an array", internalapi.ErrInvalidRequestBody)
+	}
+	if topLevelRefusal != "" {
+		parts = append(parts, genai.NewPartFromText(topLevelRefusal))
 	}
 
 	return parts, knownToolCalls, nil
