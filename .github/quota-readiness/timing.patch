@@ -1,0 +1,24 @@
+--- a/tests/internal/e2elib/e2elib.go
++++ b/tests/internal/e2elib/e2elib.go
+@@ -640,8 +640,11 @@
+ }
+ 
+ func RequireWaitForGatewayPodReadyWithNamespace(t *testing.T, namespace, selector string) {
++	t.Logf("QUOTA_WAIT_GATEWAY_ENTER %s", time.Now().UTC().Format(time.RFC3339Nano))
+ 	requireWaitForGatewayPod(t, namespace, selector)
++	t.Logf("QUOTA_WAIT_SIDECAR_RETURN %s", time.Now().UTC().Format(time.RFC3339Nano))
+ 	RequireWaitForPodReady(t, namespace, selector)
++	t.Logf("QUOTA_WAIT_GATEWAY_READY_RETURN %s", time.Now().UTC().Format(time.RFC3339Nano))
+ }
+ 
+ // RequireGatewayListenerAddressViaMetalLB gets the external IP address of the Gateway via MetalLB.
+--- a/tests/e2e/backend_quota_cross_namespace_test.go
++++ b/tests/e2e/backend_quota_cross_namespace_test.go
+@@ -64,6 +64,7 @@
+ 
+ 	e2elib.RequireWaitForGatewayPodReady(t, gatewaySelector)
+ 	e2elib.RequireWaitForPodReady(t, backendNamespace, "app=cross-ns-quota-testupstream")
++	t.Logf("QUOTA_WAIT_BACKEND_READY_RETURN %s", time.Now().UTC().Format(time.RFC3339Nano))
+ 
+ 	doRequest := func(totalTokens int) (int, string) {
+ 		t.Helper()

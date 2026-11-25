@@ -1,0 +1,67 @@
+name: Hosted quota readiness pair
+run-name: Compare quota readiness on Envoy Gateway v1.9.3
+
+on:
+  push:
+    branches:
+      - codex/quota-v193-hosted-watch
+
+permissions:
+  contents: read
+
+jobs:
+  quota:
+    if: github.repository == 'ericmariasis/ai-gateway'
+    name: Quota on v1.9.3 (${{ matrix.arm }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: parent
+            revision: 62db81abde070d484a700f6d805d44a32c27b087
+          - arm: pr
+            revision: 49cd251566b5678de845ed469ef5a7f6daac72a0
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the test revision and add the four timing markers
+        env:
+          REVISION: ${{ matrix.revision }}
+        run: |
+          set -euo pipefail
+          cp -r .github/quota-readiness "$RUNNER_TEMP/quota-readiness"
+          git checkout --detach --quiet "$REVISION"
+          test "$(git rev-parse HEAD)" = "$REVISION"
+          git apply --check "$RUNNER_TEMP/quota-readiness/timing.patch"
+          git apply "$RUNNER_TEMP/quota-readiness/timing.patch"
+          git diff --check
+          git diff --stat
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          cache: false
+          go-version-file: go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/.cache/golangci-lint
+            ~/go/pkg/mod
+            ~/go/bin
+          key: e2e-test-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - name: Run the E2E suite and watch quota readiness
+        env:
+          EG_VERSION: v1.9.3
+        run: python3 "$RUNNER_TEMP/quota-readiness/observe_run.py" "$RUNNER_TEMP/quota-trace"
+      - name: Save the quota test and pod watch
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: quota-v193-${{ matrix.arm }}
+          path: ${{ runner.temp }}/quota-trace/
+          if-no-files-found: warn
+          retention-days: 7
