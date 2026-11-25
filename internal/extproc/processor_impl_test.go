@@ -23,7 +23,9 @@ import (
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/cel-go/cel"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
@@ -366,6 +368,38 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseHeaders(t *testin
 		require.Empty(t, commonRes.HeaderMutation)
 		require.Nil(t, res.ModeOverride)
 	})
+}
+
+func TestBedrockChatMissingOutputRecordsResponseModel(t *testing.T) {
+	raw := []byte(`{"model":"amazon.nova-lite-v1:0","messages":[{"role":"user","content":"Hello"}]}`)
+	var req openai.ChatCompletionRequest
+	require.NoError(t, json.Unmarshal(raw, &req))
+
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+	p := &chatCompletionProcessorUpstreamFilter{
+		metrics:         metrics.NewMetricsFactory(meter, nil, metrics.GenAIOperationChat).NewMetrics(),
+		requestHeaders:  map[string]string{},
+		responseHeaders: map[string]string{":status": "200"},
+	}
+	router := &chatCompletionProcessorRouterFilter{originalRequestBody: &req, originalRequestBodyRaw: raw, originalModel: req.Model}
+	backend := &filterapi.Backend{Name: "bedrock", Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaAWSBedrock}}
+	require.NoError(t, p.SetBackend(t.Context(), &filterapi.RuntimeBackend{Backend: backend}, "", router))
+	_, err := p.ProcessRequestHeaders(t.Context(), nil)
+	require.NoError(t, err)
+
+	_, err = p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte(`{}`), EndOfStream: true})
+	require.ErrorContains(t, err, "bedrock response missing 'output'")
+	count, _ := testotel.GetHistogramValues(t, reader, "gen_ai.server.request.duration", attribute.NewSet(
+		attribute.String("error.type", "_OTHER"),
+		attribute.String("gen_ai.response.model", req.Model),
+		attribute.String("gen_ai.request.model", req.Model),
+		attribute.String("gen_ai.original.model", req.Model),
+		attribute.String("gen_ai.operation.name", "chat"),
+		attribute.String("gen_ai.provider.name", "aws.bedrock"),
+		attribute.String("gen_ai.backend", backend.Name),
+	))
+	require.EqualValues(t, 1, count)
 }
 
 func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T) {
