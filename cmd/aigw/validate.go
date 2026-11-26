@@ -42,6 +42,9 @@ func validate(ctx context.Context, c *cmdValidate, stdout, stderr io.Writer) err
 		}
 	}
 	for _, route := range mcpRoutes {
+		if len(route.Spec.ParentRefs) == 0 {
+			return fmt.Errorf("config validation failed: MCPRoute %q spec.parentRefs must contain at least one Gateway reference", route.Name)
+		}
 		if err := validateParentKinds("MCPRoute", route.Name, route.Spec.ParentRefs); err != nil {
 			return err
 		}
