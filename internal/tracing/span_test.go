@@ -108,17 +108,36 @@ func TestChatCompletionSpan_EndSpanOnError(t *testing.T) {
 }
 
 func TestChatCompletionSpan_EndSpanOnCancel(t *testing.T) {
-	actualSpan := testotel.RecordWithSpan(t, func(span oteltrace.Span) bool {
-		s := &chatCompletionSpan{span: span, recorder: testChatCompletionRecorder{}}
-		s.EndSpanOnCancel()
-		return true // EndSpanOnCancel ends the underlying span.
-	})
+	content := "hello"
+	firstChunk := &openai.ChatCompletionResponseChunk{
+		Choices: []openai.ChatCompletionResponseChunkChoice{{
+			Delta: &openai.ChatCompletionResponseChunkChoiceDelta{Role: "assistant", Content: &content},
+		}},
+	}
+	for _, tc := range []struct {
+		name  string
+		chunk *openai.ChatCompletionResponseChunk
+	}{
+		{name: "before any chunk"},
+		{name: "after one content chunk", chunk: firstChunk},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			actualSpan := testotel.RecordWithSpan(t, func(span oteltrace.Span) bool {
+				s := &chatCompletionSpan{span: span, recorder: testChatCompletionRecorder{}}
+				if tc.chunk != nil {
+					s.RecordResponseChunk(tc.chunk)
+				}
+				s.EndSpanOnCancel()
+				return true // EndSpanOnCancel ends the underlying span.
+			})
 
-	require.Equal(t, []attribute.KeyValue{
-		attribute.String("error.type", "cancelled"),
-	}, actualSpan.Attributes)
-	require.Equal(t, codes.Error, actualSpan.Status.Code)
-	require.Equal(t, "downstream client disconnected before a response was received", actualSpan.Status.Description)
+			require.Equal(t, []attribute.KeyValue{
+				attribute.String("error.type", "cancelled"),
+			}, actualSpan.Attributes)
+			require.Equal(t, codes.Error, actualSpan.Status.Code)
+			require.Equal(t, "downstream client disconnected before the response completed", actualSpan.Status.Description)
+		})
+	}
 }
 
 func TestChatCompletionSpan_EndSpan(t *testing.T) {

@@ -63,7 +63,7 @@ func (s *span[RespT, ChunkT]) EndSpan() {
 // report: the span is closed with the error status and the cancellation error type.
 func (s *span[RespT, ChunkT]) EndSpanOnCancel() {
 	s.span.SetAttributes(attribute.String(errorTypeAttribute, cancelledErrorType))
-	s.span.SetStatus(codes.Error, "downstream client disconnected before a response was received")
+	s.span.SetStatus(codes.Error, "downstream client disconnected before the response completed")
 	s.span.End()
 }
 
