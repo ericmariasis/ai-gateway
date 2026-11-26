@@ -72,7 +72,8 @@ static_resources:
                             headers:
                               - name: x-ai-eg-model
                                 string_match:
-                                  exact: gcp-batch-test-model
+                                  safe_regex:
+                                    regex: "gcp-batch-test-model|publishers/google/models/[a-z0-9-]+|projects/test/locations/us-central1/models/[0-9]+"
                           route:
                             cluster: testupstream-gcp-batch
                           metadata:

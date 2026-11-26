@@ -26,7 +26,10 @@ const (
 	// endpoint in envoy.yaml.
 	gcpBatchTestBackendName = "test-ns/gcp-batch-backend/route/gcp-batch-route/rule/0/ref/0"
 	// gcpBatchTestModel is the routing model matched by the GCP batch test route.
-	gcpBatchTestModel = "gcp-batch-test-model"
+	gcpBatchTestModel                = "gcp-batch-test-model"
+	gcpBatchTestPublisherModel       = "publishers/google/models/" + gcpBatchTestModel
+	gcpBatchNamedEmbeddingModel      = "publishers/google/models/text-embedding-005"
+	gcpBatchRegisteredEmbeddingModel = "projects/test/locations/us-central1/models/123"
 	// gcpBatchTestJobsPath is the upstream Vertex AI batch jobs path built from the GCP auth
 	// handler's project/region prefix and the translator's relative path.
 	gcpBatchTestJobsPath = "/v1/projects/gcp-project-name/locations/gcp-region/batchPredictionJobs"
@@ -57,7 +60,10 @@ func gcpBatchTestConfig() string {
 				Auth:   &filterapi.BackendAuth{APIKey: &filterapi.APIKeyAuth{Key: filesTestAPIKey}},
 			},
 		},
-		Models: []filterapi.Model{{Name: gcpBatchTestModel}, {Name: filesTestModel}},
+		Models: []filterapi.Model{
+			{Name: gcpBatchTestModel}, {Name: filesTestModel},
+			{Name: gcpBatchNamedEmbeddingModel}, {Name: gcpBatchRegisteredEmbeddingModel},
+		},
 	}
 	b, err := yaml.Marshal(config)
 	if err != nil {
@@ -67,9 +73,9 @@ func gcpBatchTestConfig() string {
 }
 
 // gcpBatchJob returns a Vertex AI batch prediction job response body.
-func gcpBatchJob(id, model, state, extra string) string {
+func gcpBatchJob(id, modelResource, state, extra string) string {
 	return `{"name":"projects/gcp-project-name/locations/gcp-region/batchPredictionJobs/` + id + `",` +
-		`"displayName":"dp-test","model":"publishers/google/models/` + model + `",` +
+		`"displayName":"dp-test","model":"` + modelResource + `",` +
 		`"inputConfig":{"instancesFormat":"jsonl","gcsSource":{"uris":["` + gcpBatchTestInputURI + `"]}},` +
 		`"outputConfig":{"predictionsFormat":"jsonl","gcsDestination":{"outputUriPrefix":"gs://test-bucket/out/"}},` +
 		`"state":"` + state + `","createTime":"2025-01-01T00:00:00Z"` + extra + `}`
@@ -114,7 +120,7 @@ func TestBatchAPI_GCPVertexAI(t *testing.T) {
 					`"outputConfig":{"predictionsFormat":"jsonl","gcsDestination":{"outputUriPrefix":"gs://test-bucket/out/"}},` +
 					`"labels":{"team":"ml"}}`,
 				responseType: "gzip",
-				responseBody: gcpBatchJob(tc.nativeID, gcpBatchTestModel, "JOB_STATE_QUEUED", ""),
+				responseBody: gcpBatchJob(tc.nativeID, gcpBatchTestPublisherModel, "JOB_STATE_QUEUED", ""),
 			}, http.StatusOK)
 			requireGCPBatchID(t, gjson.GetBytes(created, "id").String(), tc.nativeID)
 			require.Equal(t, "batch", gjson.GetBytes(created, "object").String())
@@ -137,7 +143,7 @@ func TestBatchAPI_GCPVertexAI(t *testing.T) {
 			expHeaders:   gcpBatchTestAuthHeader,
 			expPath:      gcpBatchTestJobsPath + "/1001",
 			responseType: "gzip",
-			responseBody: gcpBatchJob("1001", gcpBatchTestModel, "JOB_STATE_SUCCEEDED",
+			responseBody: gcpBatchJob("1001", gcpBatchTestPublisherModel, "JOB_STATE_SUCCEEDED",
 				`,"outputInfo":{"gcsOutputDirectory":"gs://test-bucket/out/prediction-1"},`+
 					`"completionStats":{"successfulCount":"2","failedCount":"1"},"endTime":"2025-01-01T00:10:00Z"`),
 		}, http.StatusOK)
@@ -149,10 +155,44 @@ func TestBatchAPI_GCPVertexAI(t *testing.T) {
 		require.Equal(t, int64(1735690200), gjson.GetBytes(retrieved, "completed_at").Int())
 	})
 
+	for _, tc := range []struct{ name, model, jobID string }{
+		{"named model", gcpBatchNamedEmbeddingModel, "2001"},
+		{"registered model", gcpBatchRegisteredEmbeddingModel, "2002"},
+	} {
+		t.Run("embeddings endpoint/"+tc.name, func(t *testing.T) {
+			const endpoint = "/v1/embeddings"
+			created := doBatchRequest(t, addr, &batchRequest{
+				method: http.MethodPost,
+				path:   "/v1/batches",
+				body: `{"input_file_id":"` + gcpBatchTestInputURI + `","endpoint":"` + endpoint + `",` +
+					`"completion_window":"24h","model":"` + tc.model + `"}`,
+				expHeaders:   gcpBatchTestAuthHeader,
+				expPath:      gcpBatchTestJobsPath,
+				responseBody: gcpBatchJob(tc.jobID, tc.model, "JOB_STATE_QUEUED", ""),
+			}, http.StatusOK)
+			id := gjson.GetBytes(created, "id").String()
+			require.NotEmpty(t, id)
+			t.Run("create", func(t *testing.T) {
+				require.Equal(t, endpoint, gjson.GetBytes(created, "endpoint").String())
+			})
+			t.Run("retrieve", func(t *testing.T) {
+				retrieved := doBatchRequest(t, addr, &batchRequest{
+					method:       http.MethodGet,
+					path:         "/v1/batches/" + id,
+					expHeaders:   gcpBatchTestAuthHeader,
+					expPath:      gcpBatchTestJobsPath + "/" + tc.jobID,
+					responseBody: gcpBatchJob(tc.jobID, tc.model, "JOB_STATE_SUCCEEDED", ""),
+				}, http.StatusOK)
+				require.Equal(t, id, gjson.GetBytes(retrieved, "id").String())
+				require.Equal(t, endpoint, gjson.GetBytes(retrieved, "endpoint").String())
+			})
+		})
+	}
+
 	t.Run("list and paginate", func(t *testing.T) {
 		page := `{"batchPredictionJobs":[` +
-			gcpBatchJob("1001", gcpBatchTestModel, "JOB_STATE_RUNNING", "") + `,` +
-			gcpBatchJob("1003", "some-other-model", "JOB_STATE_RUNNING", "") +
+			gcpBatchJob("1001", gcpBatchTestPublisherModel, "JOB_STATE_RUNNING", "") + `,` +
+			gcpBatchJob("1003", "publishers/google/models/some-other-model", "JOB_STATE_RUNNING", "") +
 			`],"nextPageToken":"page-token-2"}`
 		listed := doBatchRequest(t, addr, &batchRequest{
 			method:       http.MethodGet,
