@@ -17,15 +17,16 @@ import (
 
 func TestValidate(t *testing.T) {
 	const basicConfig = "testdata/translate_basic.in.yaml"
-	config, err := os.ReadFile(basicConfig)
-	require.NoError(t, err)
+	const mcpConfig = "testdata/validate_mcp_parent.yaml"
 
 	// Change only the route's parent kind. The Gateway and all backends still exist.
-	gatewayParent := []byte("      kind: Gateway")
-	require.Equal(t, 1, bytes.Count(config, gatewayParent))
-	dir := t.TempDir()
-	writeParentVariant := func(name, replacement string) string {
-		path := filepath.Join(dir, name)
+	writeParentVariant := func(configPath, replacement string) string {
+		t.Helper()
+		config, err := os.ReadFile(configPath)
+		require.NoError(t, err)
+		gatewayParent := []byte("      kind: Gateway")
+		require.Equal(t, 1, bytes.Count(config, gatewayParent))
+		path := filepath.Join(t.TempDir(), filepath.Base(configPath))
 		variant := bytes.Replace(config, gatewayParent, []byte(replacement), 1)
 		require.NoError(t, os.WriteFile(path, variant, 0o600))
 		return path
@@ -44,13 +45,28 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:   "HTTPRoute parent kind with existing Gateway and backends",
-			paths:  []string{writeParentVariant("httproute-parent.yaml", "      kind: HTTPRoute")},
+			paths:  []string{writeParentVariant(basicConfig, "      kind: HTTPRoute")},
 			expErr: "only Gateway is supported",
 		},
 		{
 			name:   "omitted parent kind defaults to Gateway",
-			paths:  []string{writeParentVariant("omitted-parent-kind.yaml", "")},
+			paths:  []string{writeParentVariant(basicConfig, "")},
 			expOut: "OK: config is valid\n",
+		},
+		{
+			name:   "MCPRoute with Gateway parent",
+			paths:  []string{mcpConfig},
+			expOut: "OK: config is valid\n",
+		},
+		{
+			name:   "MCPRoute with omitted parent kind",
+			paths:  []string{writeParentVariant(mcpConfig, "")},
+			expOut: "OK: config is valid\n",
+		},
+		{
+			name:   "MCPRoute with HTTPRoute parent",
+			paths:  []string{writeParentVariant(mcpConfig, "      kind: HTTPRoute")},
+			expErr: `MCPRoute "mcp-route" spec.parentRefs[0].kind "HTTPRoute": only Gateway is supported`,
 		},
 		{
 			name:   "invalid parentRef kind",

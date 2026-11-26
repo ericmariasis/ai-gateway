@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // cmdValidate corresponds to `aigw validate` command.
@@ -34,13 +36,14 @@ func validate(ctx context.Context, c *cmdValidate, stdout, stderr io.Writer) err
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	// The fake client skips CRD admission. An omitted parent kind defaults to Gateway.
 	for _, route := range aigwRoutes {
-		for i, parent := range route.Spec.ParentRefs {
-			if parent.Kind != nil && *parent.Kind != "Gateway" {
-				return fmt.Errorf("config validation failed: AIGatewayRoute %q spec.parentRefs[%d].kind %q: only Gateway is supported",
-					route.Name, i, *parent.Kind)
-			}
+		if err := validateParentKinds("AIGatewayRoute", route.Name, route.Spec.ParentRefs); err != nil {
+			return err
+		}
+	}
+	for _, route := range mcpRoutes {
+		if err := validateParentKinds("MCPRoute", route.Name, route.Spec.ParentRefs); err != nil {
+			return err
 		}
 	}
 
@@ -54,5 +57,16 @@ func validate(ctx context.Context, c *cmdValidate, stdout, stderr io.Writer) err
 	}
 
 	_, _ = fmt.Fprintln(stdout, "OK: config is valid")
+	return nil
+}
+
+// The fake client skips CRD admission. Both route CRDs default an omitted parent kind to Gateway.
+func validateParentKinds(routeKind, routeName string, parents []gwapiv1.ParentReference) error {
+	for i, parent := range parents {
+		if parent.Kind != nil && *parent.Kind != "Gateway" {
+			return fmt.Errorf("config validation failed: %s %q spec.parentRefs[%d].kind %q: only Gateway is supported",
+				routeKind, routeName, i, *parent.Kind)
+		}
+	}
 	return nil
 }
