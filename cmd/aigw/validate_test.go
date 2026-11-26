@@ -21,11 +21,15 @@ func TestValidate(t *testing.T) {
 	require.NoError(t, err)
 
 	// Change only the route's parent kind. The Gateway and all backends still exist.
-	gatewayParent := []byte("\n      kind: Gateway")
+	gatewayParent := []byte("      kind: Gateway")
 	require.Equal(t, 1, bytes.Count(config, gatewayParent))
-	httpRouteConfig := bytes.Replace(config, gatewayParent, []byte("\n      kind: HTTPRoute"), 1)
-	httpRoutePath := filepath.Join(t.TempDir(), "httproute-parent.yaml")
-	require.NoError(t, os.WriteFile(httpRoutePath, httpRouteConfig, 0o600))
+	dir := t.TempDir()
+	writeParentVariant := func(name, replacement string) string {
+		path := filepath.Join(dir, name)
+		variant := bytes.Replace(config, gatewayParent, []byte(replacement), 1)
+		require.NoError(t, os.WriteFile(path, variant, 0o600))
+		return path
+	}
 
 	for _, tc := range []struct {
 		name   string
@@ -40,8 +44,13 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:   "HTTPRoute parent kind with existing Gateway and backends",
-			paths:  []string{httpRoutePath},
+			paths:  []string{writeParentVariant("httproute-parent.yaml", "      kind: HTTPRoute")},
 			expErr: "only Gateway is supported",
+		},
+		{
+			name:   "omitted parent kind defaults to Gateway",
+			paths:  []string{writeParentVariant("omitted-parent-kind.yaml", "")},
+			expOut: "OK: config is valid\n",
 		},
 		{
 			name:   "invalid parentRef kind",
