@@ -108,13 +108,15 @@ func requireDecodes(t *testing.T, id, kind, nativeID string) {
 }
 
 // TestBatchAPI_Lifecycle walks the full flow against the test upstream:
-// upload input file -> create batch -> retrieve -> list (+ paginate) -> cancel -> download output.
+// upload input file -> create batch -> retrieve -> download output and errors -> list (+ paginate) -> cancel.
 func TestBatchAPI_Lifecycle(t *testing.T) {
 	env := startTestEnvironment(t, filesTestConfig(), true, false)
 	addr := fmt.Sprintf("http://localhost:%d", env.EnvoyListenerPort())
 
 	// 1. Upload the input file through the Files API to obtain a gateway file id.
-	uploadBody, ct := buildUploadBody(t, filesTestModel)
+	const inputJSONL = `{"custom_id":"row-success","method":"POST","url":"/v1/chat/completions","body":{"model":"` + filesTestModel + `","messages":[{"role":"user","content":"Is the café open?"}]}}` + "\n" +
+		`{"custom_id":"row-failure","method":"POST","url":"/v1/chat/completions","body":{"model":"` + filesTestModel + `","messages":[{"role":"user","content":"What time does the shop open?"}]}}` + "\n"
+	uploadBody, ct := buildUploadBodyWithContent(t, filesTestModel, inputJSONL)
 	var inputFileID string
 	require.Eventually(t, func() bool {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, addr+"/v1/files", bytes.NewReader(uploadBody))
@@ -122,7 +124,7 @@ func TestBatchAPI_Lifecycle(t *testing.T) {
 		req.Header.Set("Content-Type", ct)
 		setExpectedFilesAuthHeader(req)
 		req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString(
-			[]byte(`{"id":"file-in-native","object":"file","bytes":21,"purpose":"batch"}`)))
+			[]byte(fmt.Sprintf(`{"id":"file-in-native","object":"file","bytes":%d,"purpose":"batch"}`, len(inputJSONL)))))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return false
@@ -136,7 +138,8 @@ func TestBatchAPI_Lifecycle(t *testing.T) {
 
 	nativeBatch := `{"id":"batch_native_1","object":"batch","endpoint":"/v1/chat/completions",` +
 		`"input_file_id":"file-in-native","completion_window":"24h","status":"%s",` +
-		`"output_file_id":%s,"error_file_id":null,"created_at":1,"request_counts":{"total":1,"completed":%d,"failed":0}}`
+		`"output_file_id":%s,"error_file_id":%s,"created_at":1,"request_counts":{"total":2,"completed":%d,"failed":%d}}`
+	completedBatch := fmt.Sprintf(nativeBatch, "completed", `"file-out-native"`, `"file-err-native"`, 1, 1)
 
 	// 2. Create: routed by the input file's model; the upstream sees the native file id.
 	created := doBatchRequest(t, addr, &batchRequest{
@@ -145,33 +148,54 @@ func TestBatchAPI_Lifecycle(t *testing.T) {
 		body:         `{"input_file_id":"` + inputFileID + `","endpoint":"/v1/chat/completions","completion_window":"24h"}`,
 		expPath:      "/v1/batches",
 		expBody:      `{"input_file_id":"file-in-native","endpoint":"/v1/chat/completions","completion_window":"24h"}`,
-		responseBody: fmt.Sprintf(nativeBatch, "validating", "null", 0),
+		responseBody: fmt.Sprintf(nativeBatch, "validating", "null", "null", 0, 0),
 	}, http.StatusOK)
 	batchID := gjson.GetBytes(created, "id").String()
 	requireDecodes(t, batchID, idcodec.KindBatch, "batch_native_1")
 	require.Equal(t, inputFileID, gjson.GetBytes(created, "input_file_id").String())
 	require.NotContains(t, string(created), "native")
 
-	// 3. Retrieve a completed batch: the output file id is gateway-encoded.
+	// 3. Retrieve a completed batch with one successful request and one failed request.
 	retrieved := doBatchRequest(t, addr, &batchRequest{
 		method:       http.MethodGet,
 		path:         "/v1/batches/" + batchID,
 		expPath:      "/v1/batches/batch_native_1",
-		responseBody: fmt.Sprintf(nativeBatch, "completed", `"file-out-native"`, 1),
+		responseBody: completedBatch,
 	}, http.StatusOK)
 	require.Equal(t, batchID, gjson.GetBytes(retrieved, "id").String())
-	outputFileID := gjson.GetBytes(retrieved, "output_file_id").String()
-	requireDecodes(t, outputFileID, idcodec.KindFile, "file-out-native")
+	require.Equal(t, "completed", gjson.GetBytes(retrieved, "status").String())
+	require.Equal(t, int64(2), gjson.GetBytes(retrieved, "request_counts.total").Int())
 	require.Equal(t, int64(1), gjson.GetBytes(retrieved, "request_counts.completed").Int())
+	require.Equal(t, int64(1), gjson.GetBytes(retrieved, "request_counts.failed").Int())
 
-	// 4. Download output via the Files API using the gateway output file id.
-	content := doBatchRequest(t, addr, &batchRequest{
-		method:       http.MethodGet,
-		path:         "/v1/files/" + outputFileID + "/content",
-		expPath:      "/v1/files/file-out-native/content",
-		responseBody: `{"custom_id":"req-1","response":{"status_code":200}}`,
-	}, http.StatusOK)
-	require.Contains(t, string(content), `"custom_id":"req-1"`)
+	// 4. Each returned file id must reach its own upstream path and preserve the JSONL bytes.
+	for _, file := range []struct {
+		field, nativeID, jsonl string
+	}{
+		{
+			field: "output_file_id", nativeID: "file-out-native",
+			jsonl: `{"id":"batch_req_001","custom_id":"row-success","response":{"status_code":200,"request_id":"req_001",` +
+				`"body":{"object":"chat.completion","model":"` + filesTestModel + `","choices":[{"index":0,` +
+				`"message":{"role":"assistant","content":"Café is open."},"finish_reason":"stop"}]}},"error":null}` + "\n",
+		},
+		{
+			field: "error_file_id", nativeID: "file-err-native",
+			jsonl: `{"id":"batch_req_002","custom_id":"row-failure","response":{"status_code":503,"request_id":"req_002",` +
+				`"body":{"error":{"type":"server_error","code":"service_unavailable","message":"Provider temporarily unavailable."}}},"error":null}` + "\n",
+		},
+	} {
+		t.Run(file.field, func(t *testing.T) {
+			fileID := gjson.GetBytes(retrieved, file.field).String()
+			requireDecodes(t, fileID, idcodec.KindFile, file.nativeID)
+			content := doBatchRequest(t, addr, &batchRequest{
+				method:       http.MethodGet,
+				path:         "/v1/files/" + fileID + "/content",
+				expPath:      "/v1/files/" + file.nativeID + "/content",
+				responseBody: file.jsonl,
+			}, http.StatusOK)
+			require.Equal(t, []byte(file.jsonl), content)
+		})
+	}
 
 	// 5. List by model; "model" is stripped and ids/cursors are gateway-encoded.
 	listed := doBatchRequest(t, addr, &batchRequest{
@@ -179,7 +203,7 @@ func TestBatchAPI_Lifecycle(t *testing.T) {
 		path:         "/v1/batches?model=" + filesTestModel + "&limit=1",
 		expPath:      "/v1/batches",
 		expQuery:     "limit=1",
-		responseBody: `{"object":"list","data":[` + fmt.Sprintf(nativeBatch, "completed", `"file-out-native"`, 1) + `],"first_id":"batch_native_1","last_id":"batch_native_1","has_more":true}`,
+		responseBody: `{"object":"list","data":[` + completedBatch + `],"first_id":"batch_native_1","last_id":"batch_native_1","has_more":true}`,
 	}, http.StatusOK)
 	require.Equal(t, batchID, gjson.GetBytes(listed, "data.0.id").String())
 	lastID := gjson.GetBytes(listed, "last_id").String()
@@ -200,7 +224,7 @@ func TestBatchAPI_Lifecycle(t *testing.T) {
 		method:       http.MethodPost,
 		path:         "/v1/batches/" + batchID + "/cancel",
 		expPath:      "/v1/batches/batch_native_1/cancel",
-		responseBody: fmt.Sprintf(nativeBatch, "cancelling", "null", 0),
+		responseBody: fmt.Sprintf(nativeBatch, "cancelling", "null", "null", 0, 0),
 	}, http.StatusOK)
 	require.Equal(t, "cancelling", gjson.GetBytes(cancelled, "status").String())
 	require.Equal(t, batchID, gjson.GetBytes(cancelled, "id").String())

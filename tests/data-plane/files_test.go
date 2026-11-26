@@ -109,6 +109,11 @@ func filesTestConfig() string {
 // buildUploadBody creates a multipart body for a file upload with the given model.
 func buildUploadBody(t *testing.T, model string) ([]byte, string) {
 	t.Helper()
+	return buildUploadBodyWithContent(t, model, `{"custom_id":"req-1"}`)
+}
+
+func buildUploadBodyWithContent(t *testing.T, model, content string) ([]byte, string) {
+	t.Helper()
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 	require.NoError(t, w.WriteField("purpose", "batch"))
@@ -117,7 +122,7 @@ func buildUploadBody(t *testing.T, model string) ([]byte, string) {
 	}
 	fw, err := w.CreateFormFile("file", "input.jsonl")
 	require.NoError(t, err)
-	_, err = fw.Write([]byte(`{"custom_id":"req-1"}`))
+	_, err = fw.Write([]byte(content))
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 	return buf.Bytes(), w.FormDataContentType()
